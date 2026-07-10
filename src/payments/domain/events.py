@@ -18,6 +18,11 @@ from payments.domain.enums import Currency, PaymentStatus
 
 PAYMENT_CREATED: Final = "payment.created"
 
+# Единый источник ключа маршрутизации события `payment.created`. Живёт в
+# доменном слое (без зависимости от faststream), чтобы и API (запись в outbox),
+# и брокерская топология ссылались на одну строку и не разъезжались.
+PAYMENTS_NEW_ROUTING_KEY: Final = "payments.new"
+
 # Пространство имён для стабильных идентификаторов webhook-событий (UUIDv5).
 # Один платёж → один event_id, сколько бы раз доставка ни повторялась.
 WEBHOOK_EVENT_NAMESPACE: Final = uuid.UUID("6f1a2c34-8b5e-4d2a-9f60-1c7d5f0a3b21")

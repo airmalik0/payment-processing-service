@@ -34,9 +34,6 @@ def _database_url() -> str:
     return url
 
 
-config.set_main_option("sqlalchemy.url", _database_url())
-
-
 def run_migrations_offline() -> None:
     """Генерация SQL без подключения к БД."""
     context.configure(
@@ -63,8 +60,13 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
+    # URL кладём прямо в секцию, минуя config.set_main_option / configparser:
+    # символ `%` в пароле сломал бы интерполяцию configparser.
+    configuration = config.get_section(config.config_ini_section, {}) or {}
+    configuration["sqlalchemy.url"] = _database_url()
+
     connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )

@@ -50,7 +50,6 @@ class Settings(BaseSettings):
     # --- Outbox relay ---
     outbox_poll_interval_seconds: float = Field(default=0.2, gt=0)
     outbox_batch_size: int = Field(default=50, ge=1)
-    outbox_max_publish_attempts: int = Field(default=10, ge=1)
 
     @field_validator("database_url")
     @classmethod

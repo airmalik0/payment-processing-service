@@ -54,7 +54,11 @@ async def verify_api_key(
     """
     expected = settings.api_key.get_secret_value()
 
-    if x_api_key is None or not secrets.compare_digest(x_api_key, expected):
+    # Сравниваем в байтах: str-версия compare_digest падает TypeError на не-ASCII
+    # ключе (клиент прислал бы 500 вместо честного 401).
+    if x_api_key is None or not secrets.compare_digest(
+        x_api_key.encode("utf-8"), expected.encode("utf-8")
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Неверный или отсутствующий API-ключ",

@@ -30,6 +30,16 @@ logger = get_logger(__name__)
 MAX_ERROR_LENGTH = 500
 
 
+def _looks_like_broker_down(error: Exception) -> bool:
+    """Похоже ли, что публикация упала из-за недоступности брокера, а не одного сообщения.
+
+    Различаем «весь брокер лёг» (обрыв соединения, таймаут подтверждения) от
+    единичной проблемы конкретного сообщения. В первом случае обработку пачки
+    прерываем, чтобы не ждать таймаут на каждой оставшейся строке.
+    """
+    return isinstance(error, ConnectionError | TimeoutError | OSError)
+
+
 class OutboxRelay:
     """Периодически публикует неопубликованные события."""
 
@@ -72,10 +82,14 @@ class OutboxRelay:
     async def publish_pending_batch(self) -> int:
         """Публикует одну пачку событий. Возвращает число опубликованных.
 
-        Каждое событие публикуется и помечается в собственной вложенной
-        транзакции: сбой на одном сообщении не откатывает уже опубликованные.
-        Строки заблокированы `FOR UPDATE SKIP LOCKED` на всё время батча, поэтому
-        соседняя реплика relay возьмёт другие строки, а не эти же.
+        Пачка обрабатывается в одной транзакции и коммитится целиком. Сбой на
+        одном сообщении не роняет остальные — `_publish_one` глотает ошибку и
+        помечает сообщение под повтор. Если же брокер недоступен (сбой
+        соединения), обработка пачки прерывается сразу: нет смысла ждать таймаут
+        публикации на каждой из оставшихся строк, держа их заблокированными.
+
+        Строки заблокированы `FOR UPDATE SKIP LOCKED` на всё время транзакции,
+        поэтому соседняя реплика relay возьмёт другие строки, а не эти же.
         """
         now = datetime.now(UTC)
         published = 0
@@ -89,9 +103,13 @@ class OutboxRelay:
                 return 0
 
             for message in messages:
-                await self._publish_one(session, message)
+                broker_alive = await self._publish_one(session, message)
                 if message.published_at is not None:
                     published += 1
+                if not broker_alive:
+                    # Брокер недоступен — остальные публикации тоже упадут по
+                    # таймауту. Коммитим уже сделанное и выходим.
+                    break
 
             await session.commit()
 
@@ -99,14 +117,17 @@ class OutboxRelay:
             logger.info("outbox_batch_published", count=published, total=len(messages))
         return published
 
-    async def _publish_one(self, session: AsyncSession, message: OutboxMessage) -> None:
-        """Публикует одно событие и помечает его в той же транзакции.
+    async def _publish_one(self, session: AsyncSession, message: OutboxMessage) -> bool:
+        """Публикует одно событие и помечает его в транзакции пачки.
 
         Publisher confirms включены на канале по умолчанию: успешный `publish`
         означает, что брокер принял сообщение на диск (`persist=True`), а не
-        просто запись в сокет. Ошибка публикации откладывает повтор с backoff и
-        не роняет остальные сообщения пачки.
+        просто запись в сокет. Ошибка публикации откладывает повтор с backoff.
+
+        Возвращает `False`, если сбой похож на недоступность брокера — сигнал
+        вызывающему прервать пачку.
         """
+        del session  # сессия управляется вызывающим; параметр — для явности контракта
         try:
             await self._broker.publish(
                 message.payload,
@@ -129,10 +150,11 @@ class OutboxRelay:
                 attempts=message.attempts,
                 error=str(error)[:MAX_ERROR_LENGTH],
             )
-            return
+            return not _looks_like_broker_down(error)
 
         message.published_at = datetime.now(UTC)
         message.last_error = None
+        return True
 
     def _next_retry_at(self, attempts: int) -> datetime:
         """Backoff при недоступности брокера, с потолком в минуту."""

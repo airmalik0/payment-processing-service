@@ -14,7 +14,11 @@ from payments.db.models import OutboxMessage, Payment
 from payments.db.repositories import UNIQUE_VIOLATION, OutboxRepository, PaymentRepository
 from payments.domain.enums import Currency, PaymentStatus
 from payments.domain.errors import IdempotencyConflictError
-from payments.domain.events import PAYMENT_CREATED, PaymentCreatedEvent
+from payments.domain.events import (
+    PAYMENT_CREATED,
+    PAYMENTS_NEW_ROUTING_KEY,
+    PaymentCreatedEvent,
+)
 from payments.domain.fingerprint import request_fingerprint
 from payments.observability.logging import get_logger
 
@@ -23,7 +27,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-PAYMENTS_NEW_ROUTING_KEY = "payments.new"
 AGGREGATE_TYPE = "payment"
 
 

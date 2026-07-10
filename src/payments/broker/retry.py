@@ -61,12 +61,22 @@ class RetryRouter:
     Дубликат безопасен — обработка идемпотентна; потеря — нет.
     """
 
+    # Ограничение на подтверждение публикации: зависший confirm не должен
+    # навечно вешать обработчик (у relay тот же приём).
+    PUBLISH_TIMEOUT_SECONDS = 10.0
+
     def __init__(self, broker: RabbitBroker, *, max_retries: int) -> None:
         self._broker = broker
         self._max_retries = max_retries
 
     async def send_to_retry(
-        self, *, body: Any, headers: dict[str, Any], attempt: int, error: Exception
+        self,
+        *,
+        body: Any,
+        headers: dict[str, Any],
+        attempt: int,
+        error: Exception,
+        message_id: str | None = None,
     ) -> None:
         """Кладёт сообщение в очередь-отстойник попытки `attempt` (1-based)."""
         next_headers = _clean_headers(headers) | {
@@ -81,7 +91,9 @@ class RetryRouter:
             exchange=retry_exchange,
             routing_key=retry_routing_key(attempt),
             headers=next_headers,
+            message_id=message_id,
             persist=True,
+            timeout=self.PUBLISH_TIMEOUT_SECONDS,
         )
         logger.warning(
             "message_scheduled_for_retry",
@@ -92,7 +104,13 @@ class RetryRouter:
         )
 
     async def send_to_dlq(
-        self, *, body: Any, headers: dict[str, Any], attempt: int, error: Exception
+        self,
+        *,
+        body: Any,
+        headers: dict[str, Any],
+        attempt: int,
+        error: Exception,
+        message_id: str | None = None,
     ) -> None:
         """Отправляет сообщение в DLQ: попытки исчерпаны либо ошибка неустранима."""
         dlq_headers = _clean_headers(headers) | {
@@ -107,7 +125,9 @@ class RetryRouter:
             exchange=dlx_exchange,
             routing_key=DLQ_ROUTING_KEY,
             headers=dlq_headers,
+            message_id=message_id,
             persist=True,
+            timeout=self.PUBLISH_TIMEOUT_SECONDS,
         )
         logger.error(
             "message_sent_to_dlq",

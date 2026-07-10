@@ -4,21 +4,23 @@
 FROM python:3.12-slim AS builder
 
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
 # uv — быстрый установщик; копируем бинарь из официального образа.
 COPY --from=ghcr.io/astral-sh/uv:0.11.0 /uv /uvx /bin/
 
 WORKDIR /app
 
-# Сначала только манифест — слой с зависимостями кэшируется, пока pyproject не менялся.
-COPY pyproject.toml README.md ./
-COPY src ./src
+# Сначала только манифест и lock — слой зависимостей кэшируется, пока они не
+# менялись. Код копируется после, поэтому его правки не инвалидируют установку
+# зависимостей. `--frozen` требует актуального uv.lock (воспроизводимая сборка).
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-install-project --no-dev
 
-RUN uv venv /opt/venv && \
-    VIRTUAL_ENV=/opt/venv uv pip install --no-cache .
+COPY src ./src
+RUN uv sync --frozen --no-dev
 
 # --- Стадия рантайма: только venv и код, без инструментов сборки ---
 FROM python:3.12-slim AS runtime

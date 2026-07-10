@@ -29,6 +29,93 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+async def handle_delivery(
+    message: RabbitMessage,
+    *,
+    processor: PaymentProcessor,
+    router: RetryRouter,
+    max_retries: int,
+) -> None:
+    """Обрабатывает одну доставку сообщения `payments.new`.
+
+    Вынесено из замыкания подписчика, чтобы ветвление ack/nack можно было
+    протестировать без запуска брокера.
+
+    При `AckPolicy.MANUAL` FastStream сам не подтверждает сообщение. Если
+    маршрутизация в retry/DLQ или ack бросят исключение (обрыв канала,
+    PRECONDITION_FAILED), сообщение осталось бы unacked навсегда, заняв слот
+    prefetch до consumer_timeout. Внешний try возвращает такое сообщение в
+    очередь через `nack(requeue=True)` — оно обработается ещё раз, а дубликат
+    безопасен благодаря идемпотентности.
+    """
+    attempt = current_attempt(message.headers)
+    log = logger.bind(message_id=message.message_id, attempt=attempt)
+    raw_body = message.body
+
+    try:
+        # 1. Разобрать событие. Битый payload неисправим повтором — сразу в DLQ.
+        try:
+            event = PaymentCreatedEvent.model_validate_json(raw_body)
+        except ValueError as error:
+            log.error("malformed_event", error=str(error))
+            await router.send_to_dlq(
+                body=raw_body,
+                headers=message.headers,
+                attempt=attempt,
+                error=error,
+                message_id=message.message_id,
+            )
+            await message.ack()
+            return
+
+        # 2. Обработать платёж.
+        try:
+            await processor.process(event.payment_id)
+
+        except PermanentError as error:
+            # Ошибка не исчезнет при повторе (нет платежа, 4xx от webhook) → DLQ.
+            await router.send_to_dlq(
+                body=raw_body,
+                headers=message.headers,
+                attempt=attempt,
+                error=error,
+                message_id=message.message_id,
+            )
+            await message.ack()
+
+        except Exception as error:
+            # Transient-ошибки и всё неизвестное. Незнакомую ошибку считаем
+            # transient: у неё есть шанс пройти, а окончательный приговор вынесет
+            # DLQ после исчерпания попыток.
+            next_attempt = attempt + 1
+            if next_attempt > max_retries:
+                await router.send_to_dlq(
+                    body=raw_body,
+                    headers=message.headers,
+                    attempt=attempt,
+                    error=error,
+                    message_id=message.message_id,
+                )
+            else:
+                await router.send_to_retry(
+                    body=raw_body,
+                    headers=message.headers,
+                    attempt=next_attempt,
+                    error=error,
+                    message_id=message.message_id,
+                )
+            await message.ack()
+
+        else:
+            # Успех: платёж финализирован, webhook (если был) доставлен.
+            await message.ack()
+            log.info("message_processed_successfully")
+
+    except Exception:
+        logger.exception("message_handling_failed_requeue", message_id=message.message_id)
+        await message.nack(requeue=True)
+
+
 def build_consumer_broker(settings: Settings, processor: PaymentProcessor) -> RabbitBroker:
     """Собирает брокер с подписчиком на `payments.new`.
 
@@ -44,58 +131,9 @@ def build_consumer_broker(settings: Settings, processor: PaymentProcessor) -> Ra
         ack_policy=AckPolicy.MANUAL,
     )
     async def handle_payment_created(message: RabbitMessage) -> None:
-        attempt = current_attempt(message.headers)
-        log = logger.bind(
-            message_id=message.message_id,
-            attempt=attempt,
+        await handle_delivery(
+            message, processor=processor, router=router, max_retries=settings.max_retries
         )
-
-        raw_body = message.body
-
-        # 1. Разобрать событие. Битый payload неисправим повтором — сразу в DLQ.
-        try:
-            event = PaymentCreatedEvent.model_validate_json(raw_body)
-        except ValueError as error:
-            log.error("malformed_event", error=str(error))
-            await router.send_to_dlq(
-                body=raw_body, headers=message.headers, attempt=attempt, error=error
-            )
-            await message.ack()
-            return
-
-        # 2. Обработать платёж.
-        try:
-            await processor.process(event.payment_id)
-
-        except PermanentError as error:
-            # Ошибка не исчезнет при повторе (нет платежа, 4xx от webhook) → DLQ.
-            await router.send_to_dlq(
-                body=raw_body, headers=message.headers, attempt=attempt, error=error
-            )
-            await message.ack()
-
-        except Exception as error:
-            # Transient-ошибки и всё неизвестное. Незнакомую ошибку считаем
-            # transient: у неё есть шанс пройти, а окончательный приговор вынесет
-            # DLQ после исчерпания попыток.
-            next_attempt = attempt + 1
-            if next_attempt > settings.max_retries:
-                await router.send_to_dlq(
-                    body=raw_body, headers=message.headers, attempt=attempt, error=error
-                )
-            else:
-                await router.send_to_retry(
-                    body=raw_body,
-                    headers=message.headers,
-                    attempt=next_attempt,
-                    error=error,
-                )
-            await message.ack()
-
-        else:
-            # Успех: платёж финализирован, webhook (если был) доставлен.
-            await message.ack()
-            log.info("message_processed_successfully")
 
     return broker
 

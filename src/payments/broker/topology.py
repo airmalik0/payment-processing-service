@@ -25,6 +25,10 @@ from typing import Final
 
 from faststream.rabbit import ExchangeType, RabbitExchange, RabbitQueue
 
+# Единый источник ключа маршрутизации — доменный слой. Явный ре-экспорт (`as`),
+# чтобы брокерские модули брали его отсюда, а не из двух мест.
+from payments.domain.events import PAYMENTS_NEW_ROUTING_KEY as PAYMENTS_NEW_ROUTING_KEY
+
 # --- Имена ---
 PAYMENTS_EXCHANGE_NAME: Final = "payments"
 RETRY_EXCHANGE_NAME: Final = "payments.retry"
@@ -33,8 +37,8 @@ DLX_EXCHANGE_NAME: Final = "payments.dlx"
 PAYMENTS_NEW_QUEUE_NAME: Final = "payments.new"
 DLQ_NAME: Final = "payments.new.dlq"
 
-PAYMENTS_NEW_ROUTING_KEY: Final = "payments.new"
-DLQ_ROUTING_KEY: Final = "payments.new"
+# Ключ маршрутизации основной очереди — из доменного слоя (единый источник).
+DLQ_ROUTING_KEY: Final = PAYMENTS_NEW_ROUTING_KEY
 
 RETRY_COUNT_HEADER: Final = "x-retry-count"
 ERROR_HEADER: Final = "x-error"

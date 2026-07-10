@@ -29,7 +29,7 @@ RabbitMQ (FastStream) · Alembic · Docker Compose.
 Сверх минимума: идемпотентность самой обработки (шлюз не вызывается дважды),
 publisher confirms, классификация ошибок transient/permanent, HMAC-подпись
 webhook, аутентификация по `X-API-Key`, health/readiness, структурные JSON-логи,
-87 тестов и демонстрационный приёмник webhook.
+92 теста и демонстрационный приёмник webhook.
 
 ## Архитектура
 
@@ -197,8 +197,8 @@ uv venv && uv pip install -e ".[dev]"      # окружение
 docker compose up -d postgres rabbitmq      # зависимости для тестов
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src tests                        # строгая типизация
-uv run pytest                                # 86 тестов (unit + integration)
-uv run pytest -m e2e                         # + e2e на живом RabbitMQ
+uv run pytest                                # 91 тест (unit + integration; e2e исключён)
+uv run pytest -m e2e                         # e2e на живом RabbitMQ (нужен весь стек)
 ```
 
 Тесты по слоям:

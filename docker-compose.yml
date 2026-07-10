@@ -83,6 +83,11 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       OUTBOX_POLL_INTERVAL_SECONDS: ${OUTBOX_POLL_INTERVAL_SECONDS:-0.2}
       OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+      # Retry-параметры должны совпадать с consumer: relay тоже декларирует
+      # топологию, и расхождение x-message-ttl дало бы PRECONDITION_FAILED.
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      RETRY_BASE_DELAY_SECONDS: ${RETRY_BASE_DELAY_SECONDS:-1.0}
+      RETRY_MULTIPLIER: ${RETRY_MULTIPLIER:-5.0}
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,7 +111,10 @@ services:
       GATEWAY_MAX_DELAY_SECONDS: ${GATEWAY_MAX_DELAY_SECONDS:-5.0}
       GATEWAY_SUCCESS_RATE: ${GATEWAY_SUCCESS_RATE:-0.9}
       WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-local-dev-webhook-secret}
+      WEBHOOK_TIMEOUT_SECONDS: ${WEBHOOK_TIMEOUT_SECONDS:-5.0}
       MAX_RETRIES: ${MAX_RETRIES:-3}
+      RETRY_BASE_DELAY_SECONDS: ${RETRY_BASE_DELAY_SECONDS:-1.0}
+      RETRY_MULTIPLIER: ${RETRY_MULTIPLIER:-5.0}
     depends_on:
       postgres:
         condition: service_healthy

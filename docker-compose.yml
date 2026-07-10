@@ -1,0 +1,133 @@
+name: payment-processing
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payments}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payments}
+      POSTGRES_DB: ${POSTGRES_DB:-payments}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-payments} -d ${POSTGRES_DB:-payments}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-payments}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-payments}
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI: http://localhost:15672
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: накатывает схему и завершается. Все рабочие сервисы ждут его успеха.
+  migrate:
+    build:
+      context: .
+    image: payment-processing:latest
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments}@postgres:5432/${POSTGRES_DB:-payments}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+    image: payment-processing:latest
+    command: ["api"]
+    environment:
+      API_KEY: ${API_KEY:-local-dev-api-key}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments}@postgres:5432/${POSTGRES_DB:-payments}
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-payments}:${RABBITMQ_DEFAULT_PASS:-payments}@rabbitmq:5672/
+      LOG_JSON: ${LOG_JSON:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  outbox-relay:
+    build:
+      context: .
+    image: payment-processing:latest
+    command: ["relay"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments}@postgres:5432/${POSTGRES_DB:-payments}
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-payments}:${RABBITMQ_DEFAULT_PASS:-payments}@rabbitmq:5672/
+      LOG_JSON: ${LOG_JSON:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OUTBOX_POLL_INTERVAL_SECONDS: ${OUTBOX_POLL_INTERVAL_SECONDS:-0.2}
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  consumer:
+    build:
+      context: .
+    image: payment-processing:latest
+    command: ["consumer"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments}@postgres:5432/${POSTGRES_DB:-payments}
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-payments}:${RABBITMQ_DEFAULT_PASS:-payments}@rabbitmq:5672/
+      LOG_JSON: ${LOG_JSON:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      GATEWAY_MIN_DELAY_SECONDS: ${GATEWAY_MIN_DELAY_SECONDS:-2.0}
+      GATEWAY_MAX_DELAY_SECONDS: ${GATEWAY_MAX_DELAY_SECONDS:-5.0}
+      GATEWAY_SUCCESS_RATE: ${GATEWAY_SUCCESS_RATE:-0.9}
+      WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-local-dev-webhook-secret}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Несколько потребителей читают одну очередь — конкурентная обработка.
+    # Масштабируется командой `docker compose up --scale consumer=3`.
+    restart: unless-stopped
+
+  # Демонстрационный приёмник webhook. Печатает полученные уведомления в лог.
+  # Не часть сервиса — удобство для проверки сквозного пути.
+  webhook-sink:
+    build:
+      context: ./docker/webhook-sink
+    image: payment-processing-webhook-sink:latest
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  rabbitmq_data:

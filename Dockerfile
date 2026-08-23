@@ -22,6 +22,25 @@ RUN uv sync --frozen --no-install-project --no-dev
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
+# --- Стадия для тестов: то же окружение плюс dev-зависимости и сами тесты ---
+# Нужна, чтобы проверяющий мог прогнать весь набор тестов одной командой
+# (`make test`), не устанавливая локально Python, uv и драйверы.
+FROM builder AS dev
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH="/app/src"
+
+# dev-зависимости объявлены как extra `dev`, поэтому именно --extra:
+# обычный `uv sync` ставит только dependency-groups.
+RUN uv sync --frozen --extra dev
+COPY tests ./tests
+COPY alembic.ini ./
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["entrypoint.sh"]
+CMD ["test"]
+
 # --- Стадия рантайма: только venv и код, без инструментов сборки ---
 FROM python:3.12-slim AS runtime
 

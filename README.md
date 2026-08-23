@@ -1,5 +1,7 @@
 # Асинхронный сервис процессинга платежей
 
+[![CI](https://github.com/airmalik0/payment-processing-service/actions/workflows/ci.yml/badge.svg)](https://github.com/airmalik0/payment-processing-service/actions/workflows/ci.yml)
+
 Микросервис принимает платежи по HTTP, обрабатывает их асинхронно через
 эмуляцию платёжного шлюза и уведомляет клиента о результате через webhook.
 
@@ -12,6 +14,70 @@ RabbitMQ (FastStream) · Alembic · Docker Compose.
 
 Проектное решение и обоснование архитектурных развилок — в
 [`docs/design.md`](docs/design.md).
+
+## Проверка за две минуты
+
+Нужен только Docker с Compose v2. Ни Python, ни `uv`, ни драйверы БД локально
+не требуются.
+
+```bash
+make verify   # всё сразу: поднять стек, прогнать сквозной сценарий и тесты
+```
+
+или по шагам:
+
+```bash
+make up      # поднять весь стек (postgres, rabbitmq, миграции, api, consumer, relay, приёмник webhook)
+make demo    # сквозной сценарий: проверяет каждый пункт ТЗ на живом стенде
+make test    # 91 тест в контейнере (unit + integration; e2e — make test-e2e)
+```
+
+`make demo` сам проходит весь путь и печатает результат каждой проверки:
+
+```
+━━━ 4/7 · Асинхронная обработка и доставка webhook ━━━
+  ✓ Платёж обработан асинхронно, статус: succeeded
+  ✓ Webhook доставлен с попытки №1
+  ✓ HMAC-подпись webhook верна → True
+
+━━━ 5/7 · Повторные попытки и Dead Letter Queue ━━━
+  ✓ Webhook доставлен после повторов, всего попыток: 3
+  ✓ Сообщение ушло в payments.new.dlq без лишних повторов (было 0, стало 1)
+
+━━━ 6/7 · Outbox pattern: брокер лежит, платежи не теряются ━━━
+  ✓ Платёж принят при недоступном брокере → 202
+  ✓ Событие лежит в таблице outbox и ждёт публикации (неопубликованных: 1)
+  ✓ После возвращения брокера relay опубликовал событие, платёж обработан: succeeded
+
+  Пройдено проверок: 26  провалов нет
+```
+
+Что именно проверяет сценарий: готовность стека, аутентификацию по
+`X-API-Key`, валидацию тела, `202 Accepted`, идемпотентный повтор и конфликт
+ключа, асинхронную обработку, доставку и подпись webhook, повторные попытки с
+задержкой, попадание в DLQ, устойчивость к падению брокера. Долгий вариант
+«три попытки по 1с/5с/25с → DLQ» — `./scripts/demo.sh --full`.
+
+Всё то же самое можно посмотреть руками: [Swagger UI](http://localhost:8000/docs),
+[RabbitMQ Management](http://localhost:15672) (payments / payments),
+журнал доставленных уведомлений — <http://localhost:9000/received>.
+
+### Команды
+
+| Команда | Что делает |
+|---|---|
+| `make verify` | Стек + сквозной сценарий + тесты одной командой |
+| `make up` | Поднять стек и дождаться готовности |
+| `make demo` | Сквозной сценарий по всем пунктам ТЗ |
+| `make test` | Тесты (unit + integration) в контейнере |
+| `make test-e2e` | E2E на живом RabbitMQ |
+| `make lint` | `ruff` + `mypy --strict` в контейнере |
+| `make queues` | Глубина очередей RabbitMQ |
+| `make logs` / `make logs-consumer` | Логи |
+| `make down` / `make clean` | Остановить / остановить и удалить данные |
+
+Без `make` работает и напрямую: `docker compose up -d --build --wait`,
+`./scripts/demo.sh`, `docker compose --profile test run --rm tests`.
 
 ## Что реализовано
 
@@ -29,7 +95,7 @@ RabbitMQ (FastStream) · Alembic · Docker Compose.
 Сверх минимума: идемпотентность самой обработки (шлюз не вызывается дважды),
 publisher confirms, классификация ошибок transient/permanent, HMAC-подпись
 webhook, аутентификация по `X-API-Key`, health/readiness, структурные JSON-логи,
-92 теста и демонстрационный приёмник webhook.
+92 теста, сквозной демо-сценарий и CI.
 
 ## Архитектура
 
@@ -63,29 +129,7 @@ webhook, аутентификация по `X-API-Key`, health/readiness, стр
 принимает платежи при мёртвом брокере (события копятся в outbox), consumer
 обрабатывает при мёртвом webhook (сообщения уходят в retry).
 
-## Запуск
-
-Нужен только Docker с Compose v2.
-
-```bash
-cp .env.example .env
-docker compose up -d --build
-```
-
-Поднимутся: PostgreSQL, RabbitMQ, миграции (one-shot), `api`, `consumer`,
-`outbox-relay` и `webhook-sink` (демонстрационный приёмник webhook).
-
-Проверить готовность:
-
-```bash
-curl localhost:8000/health          # {"status":"ok"}
-curl localhost:8000/health/ready     # {"status":"ok","database":"up"}
-```
-
-* Swagger UI — <http://localhost:8000/docs>
-* RabbitMQ Management — <http://localhost:15672> (payments / payments)
-
-## Примеры
+## Примеры запросов
 
 Все запросы к `/api/v1/*` требуют заголовок `X-API-Key` (по умолчанию
 `local-dev-api-key`), создание платежа — ещё и `Idempotency-Key`.
@@ -126,10 +170,23 @@ curl localhost:8000/api/v1/payments/<payment_id> \
 
 ### Посмотреть доставленные webhook
 
-`webhook-sink` печатает каждое уведомление в лог:
+Демонстрационный приёмник `webhook-sink` хранит журнал уведомлений и проверяет
+их подпись:
 
 ```bash
-docker compose logs -f webhook-sink
+curl -s localhost:9000/received | python3 -m json.tool   # весь журнал
+curl -s "localhost:9000/received?payment_id=<id>"        # по одному платежу
+docker compose logs -f webhook-sink                      # то же потоком
+```
+
+```json
+[{
+  "event": "payment.succeeded",
+  "payment_id": "…",
+  "event_id": "7174fe9b-…",
+  "signature_valid": true,
+  "responded_with": 200
+}]
 ```
 
 Уведомление несёт заголовки `X-Webhook-Event-Id` (стабильный ID для
@@ -150,7 +207,13 @@ curl -i -X POST localhost:8000/api/v1/payments \
 
 ### Проверить retry и DLQ вручную
 
-`webhook-sink` умеет отвечать заданным кодом через query-параметр:
+Приёмник умеет управлять своим ответом через query-параметры в `webhook_url`:
+
+| Параметр | Поведение приёмника | Что демонстрирует |
+|---|---|---|
+| `?fail=2` | Первые две доставки → 503, третья → 200 | Успешную доставку после повторов |
+| `?status=500` | Всегда 500 | Исчерпание 3 попыток → DLQ |
+| `?status=404` | Всегда 404 | Неустранимую ошибку → сразу DLQ, без повторов |
 
 ```bash
 # webhook всегда отвечает 500 → 3 попытки (1с, 5с, 25с) → DLQ
@@ -161,9 +224,6 @@ curl -X POST localhost:8000/api/v1/payments \
 
 # следим за очередями: сообщение проходит retry.1 → retry.2 → retry.3 → dlq
 watch -n1 'docker compose exec -T rabbitmq rabbitmqctl list_queues name messages'
-
-# webhook отвечает 404 (неустранимо) → сразу в DLQ, без повторов
-#   …"webhook_url":"http://webhook-sink:9000/?status=404"
 ```
 
 ### Устойчивость к недоступности брокера (Outbox pattern)
@@ -191,6 +251,13 @@ docker compose start rabbitmq
 
 ## Разработка
 
+Тесты и линтеры доступны без локального окружения — `make test`, `make lint`,
+`make test-e2e` (они собирают dev-образ и запускают всё внутри контейнера).
+CI (GitHub Actions) гоняет то же самое: стиль и типы, тесты с покрытием,
+обратимость миграций, e2e и сквозной `demo.sh` на собранном образе.
+
+Если удобнее локально:
+
 ```bash
 uv venv && uv pip install -e ".[dev]"      # окружение
 
@@ -211,7 +278,8 @@ uv run pytest -m e2e                         # e2e на живом RabbitMQ (н�
 * **e2e** — обработка события через настоящий RabbitMQ. Нужен полный стек.
 
 БД в тестах изолируется внешней транзакцией на каждый тест (savepoint-режим):
-изменения откатываются, схема не пересоздаётся.
+изменения откатываются, схема не пересоздаётся. В контейнере тесты работают в
+отдельной базе `payments_test` — данные стенда не затрагиваются.
 
 ## Структура
 
@@ -226,11 +294,15 @@ src/payments/
 ├── observability/  структурное логирование
 ├── entrypoints/    точки входа процессов: api, consumer, relay
 └── config.py       конфигурация из окружения
+
+scripts/demo.sh     сквозная проверка всех пунктов ТЗ на живом стенде
+docker/             entrypoint контейнеров и демонстрационный приёмник webhook
 ```
 
 ## Конфигурация
 
-Все параметры — в `.env` (см. `.env.example`). Основное:
+Значения по умолчанию зашиты в `docker-compose.yml`, поэтому стенд поднимается
+без подготовки. Чтобы поменять — скопируйте `.env.example` в `.env`.
 
 | Переменная | Назначение | По умолчанию |
 |---|---|---|
@@ -238,6 +310,7 @@ src/payments/
 | `DATABASE_URL` | Строка подключения (только `postgresql+asyncpg`) | — |
 | `RABBITMQ_URL` | Строка подключения к брокеру | — |
 | `GATEWAY_SUCCESS_RATE` | Доля успешных платежей у эмулятора | `0.9` |
+| `GATEWAY_MIN_DELAY_SECONDS` / `GATEWAY_MAX_DELAY_SECONDS` | Задержка ответа шлюза | `2.0` / `5.0` |
 | `MAX_RETRIES` | Число повторов до DLQ | `3` |
 | `RETRY_BASE_DELAY_SECONDS` / `RETRY_MULTIPLIER` | База и множитель задержки | `1.0` / `5.0` |
 | `WEBHOOK_SIGNING_SECRET` | Секрет HMAC-подписи webhook | — |

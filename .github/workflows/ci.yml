@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Стиль и типы
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Установить uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.0"
+          enable-cache: true
+
+      - name: Установить зависимости
+        run: uv sync --frozen --extra dev
+
+      - name: ruff check
+        run: uv run ruff check --output-format=github .
+
+      - name: ruff format
+        run: uv run ruff format --check .
+
+      - name: mypy (strict)
+        run: uv run mypy src tests
+
+  tests:
+    name: Тесты (unit + integration + e2e)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: payments
+          POSTGRES_PASSWORD: payments
+          POSTGRES_DB: payments
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U payments -d payments"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: payments
+          RABBITMQ_DEFAULT_PASS: payments
+        ports: ["5672:5672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_running"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://payments:payments@localhost:5432/payments
+      RABBITMQ_URL: amqp://payments:payments@localhost:5672/
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Установить uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.0"
+          enable-cache: true
+
+      - name: Установить зависимости
+        run: uv sync --frozen --extra dev
+
+      - name: Проверить, что миграции дают ту же схему, что и модели
+        env:
+          DATABASE_URL: postgresql+asyncpg://payments:payments@localhost:5432/payments
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+
+      - name: unit + integration
+        run: uv run pytest --cov=payments --cov-report=term-missing
+
+      - name: e2e на живом RabbitMQ
+        run: uv run pytest -m e2e
+
+  docker:
+    name: Сборка образа и сквозной прогон
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Поднять весь стек
+        run: docker compose up -d --build --wait
+
+      - name: Сквозной сценарий (demo.sh)
+        run: ./scripts/demo.sh
+
+      - name: Логи при падении
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: Остановить стек
+        if: always()
+        run: docker compose down -v

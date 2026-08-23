@@ -9,7 +9,8 @@ __pycache__
 .coverage
 htmlcov
 docs
-tests
+# tests нужны стадии `dev` (прогон тестов в контейнере);
+# в рантайм-образ они не копируются.
 *.md
 !README.md
 .env

@@ -126,15 +126,42 @@ services:
     # Масштабируется командой `docker compose up --scale consumer=3`.
     restart: unless-stopped
 
-  # Демонстрационный приёмник webhook. Печатает полученные уведомления в лог.
-  # Не часть сервиса — удобство для проверки сквозного пути.
+  # Демонстрационный приёмник webhook: печатает уведомления в лог, хранит их
+  # журнал (GET localhost:9000/received) и проверяет HMAC-подпись.
+  # Не часть сервиса — стенд для проверки сквозного пути.
   webhook-sink:
     build:
       context: ./docker/webhook-sink
     image: payment-processing-webhook-sink:latest
+    environment:
+      WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-local-dev-webhook-secret}
     ports:
       - "9000:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
+
+  # Прогон тестов в контейнере: `make test` (или `docker compose run --rm tests`).
+  # Профиль `test` держит сервис вне обычного `docker compose up`.
+  tests:
+    profiles: ["test"]
+    build:
+      context: .
+      target: dev
+    image: payment-processing-dev:latest
+    environment:
+      # Тесты пересоздают схему, поэтому работают в ОТДЕЛЬНОЙ базе:
+      # рабочие данные стенда не затрагиваются.
+      TEST_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments}@postgres:5432/payments_test
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-payments}:${RABBITMQ_DEFAULT_PASS:-payments}@rabbitmq:5672/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
 volumes:
   postgres_data:

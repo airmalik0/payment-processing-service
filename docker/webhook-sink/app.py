@@ -75,7 +75,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_POST(self) -> None:  # noqa: N802 — имя задано базовым классом
+    # Имена do_POST/do_GET/do_DELETE задаёт BaseHTTPRequestHandler.
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
 
@@ -108,7 +109,7 @@ class Handler(BaseHTTPRequestHandler):
         print(json.dumps(record, ensure_ascii=False), flush=True)
         self._respond(status, {"ok": status < 400})
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         parsed = urlparse(self.path)
 
         if parsed.path.rstrip("/") == "/received":
@@ -122,7 +123,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self._respond(200, {"status": "webhook-sink alive", "received": len(_journal)})
 
-    def do_DELETE(self) -> None:  # noqa: N802
+    def do_DELETE(self) -> None:
         with _lock:
             _journal.clear()
             _delivery_counts.clear()

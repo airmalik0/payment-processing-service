@@ -35,8 +35,10 @@ ENV PATH="/opt/venv/bin:$PATH" \
 RUN uv sync --frozen --extra dev
 COPY tests ./tests
 COPY alembic.ini ./
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# docker/ копируется целиком, чтобы `make lint` проверял ровно тот же набор
+# файлов, что и CI (включая приёмник webhook), а не только src и tests.
+COPY docker ./docker
+RUN cp docker/entrypoint.sh /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["test"]
